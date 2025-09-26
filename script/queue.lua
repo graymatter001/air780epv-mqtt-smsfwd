@@ -1,96 +1,82 @@
 --[[
-queue.lua
-- Manages a generic, persistent message queue using fskv
+queue.lua keeps a minimal persistent FIFO using fskv for crash resilience.
+It exposes functional helpers rather than constructors.
 --]]
 
-local queue = {}
+local M = {}
 
--- Private function to generate a unique message ID
+local messages = {}
+
 local function generate_id()
-    return "msg-t" .. os.time() .. "r" .. math.random(9999)
+    return "msg-" .. os.time() .. "-" .. math.random(9999)
 end
 
---- Creates a new queue instance.
--- @return A new queue object.
-function queue.new()
-    local q = {}
-    q.messages = {} -- In-memory queue, stores messages as {id, payload, retry}
-
-    -- Load existing messages from fskv on startup
-    log.info("queue", "Loading existing messages from fskv")
+local function load_persisted()
+    log.info("queue", "Loading messages from fskv")
+    messages = {}
     local iter = fskv.iter()
     while iter do
-        local k = fskv.next(iter)
-        if not k then
-            break
-        end
-        -- Ensure we only load keys with our message prefix
-        if string.find(k, "msg-") then
-            local v = fskv.get(k)
-            if v then
-                local success, payload = pcall(json.decode, v)
-                if success and payload then
-                    table.insert(q.messages, { id = k, payload = payload, retry = payload.retry or 0 })
-                    log.info("queue", "Loaded message from fskv:", k)
+        local key = fskv.next(iter)
+        if not key then break end
+        if key:find("msg-") then
+            local chunk = fskv.get(key)
+            if chunk then
+                local ok, payload = pcall(json.decode, chunk)
+                if ok and payload then
+                    table.insert(messages, { id = key, payload = payload, retry = payload.retry or 0 })
                 else
-                    log.warn("queue", "Failed to decode message from fskv:", k)
+                    log.warn("queue", "Bad payload for", key)
                 end
             end
         end
     end
-    log.info("queue", "Loaded", #q.messages, "messages from fskv")
-
-    --- Adds a message to the queue.
-    -- @param payload The message payload (a Lua table).
-    function q.add(payload)
-        local id = generate_id()
-        payload.retry = payload.retry or 0
-        local message = { id = id, payload = payload, retry = payload.retry }
-
-        local success, encoded_payload = pcall(json.encode, payload)
-        if not success then
-            log.error("queue.add", "Failed to encode payload for fskv", encoded_payload)
-            return
-        end
-
-        local result = fskv.set(id, encoded_payload)
-        if result then
-            table.insert(q.messages, message)
-            log.info("queue.add", "Message added to queue and fskv", id)
-        else
-            log.error("queue.add", "Failed to save message to fskv", id)
-        end
-    end
-
-    --- Retrieves the next message from the queue for processing.
-    -- It does not remove the message; call remove() after successful processing.
-    -- @return The next message object or nil if the queue is empty.
-    function q.pop()
-        if #q.messages > 0 then
-            local message = q.messages[1]
-            message.retry = message.retry + 1
-            message.payload.retry = message.retry
-            -- Update the retry count in fskv
-            fskv.set(message.id, json.encode(message.payload))
-            return message
-        end
-        return nil
-    end
-
-    --- Removes a message from the queue and fskv.
-    -- @param id The unique ID of the message to remove.
-    function q.remove(id)
-        for i, message in ipairs(q.messages) do
-            if message.id == id then
-                table.remove(q.messages, i)
-                fskv.del(id)
-                log.info("queue.remove", "Message removed from queue and fskv", id)
-                return
-            end
-        end
-    end
-
-    return q
+    log.info("queue", "Loaded", #messages, "messages")
 end
 
-return queue
+function M.init()
+    load_persisted()
+end
+
+local function persist(id, payload)
+    local ok, encoded = pcall(json.encode, payload)
+    if not ok then
+        log.error("queue", "Encode failed", encoded)
+        return false
+    end
+    if not fskv.set(id, encoded) then
+        log.error("queue", "Persist failed", id)
+        return false
+    end
+    return true
+end
+
+function M.add(payload)
+    local id = generate_id()
+    payload.retry = payload.retry or 0
+    if persist(id, payload) then
+        table.insert(messages, { id = id, payload = payload, retry = payload.retry })
+        log.info("queue", "Queued", id)
+    end
+end
+
+function M.pop()
+    local message = messages[1]
+    if not message then return nil end
+    message.retry = message.retry + 1
+    message.payload.retry = message.retry
+    persist(message.id, message.payload)
+    return message
+end
+
+function M.remove(id)
+    for idx, message in ipairs(messages) do
+        if message.id == id then
+            table.remove(messages, idx)
+            fskv.del(id)
+            log.info("queue", "Removed", id)
+            return
+        end
+    end
+end
+
+return M

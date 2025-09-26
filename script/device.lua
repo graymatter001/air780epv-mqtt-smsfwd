@@ -5,7 +5,6 @@ device.lua
 
 local device = {}
 
--- Operator data for mapping IMSI to operator name
 local oper_data = {
     ["46000"] = "CMCC", ["46002"] = "CMCC", ["46007"] = "CMCC", ["46008"] = "CMCC",
     ["46001"] = "CU",   ["46006"] = "CU",   ["46009"] = "CU",   ["46010"] = "CU",
@@ -13,32 +12,30 @@ local oper_data = {
     ["46015"] = "CBN"
 }
 
---- Gets the current status of the device.
--- @return A table with signal_strength, operator, and uptime.
-function device.get_status()
-    local context = require("context")
-    -- Get Operator
+local function operator_name()
     local imsi = mobile.imsi(mobile.simid()) or ""
     local mcc_mnc = string.sub(imsi, 1, 5)
-    local operator = oper_data[mcc_mnc] or mcc_mnc
+    return oper_data[mcc_mnc] or mcc_mnc
+end
 
-    -- Get Uptime
-    local ms = mcu.ticks()
-    local seconds = math.floor(ms / 1000)
+local function uptime_hms()
+    local seconds = math.floor(mcu.ticks() / 1000)
     local minutes = math.floor(seconds / 60)
     local hours = math.floor(minutes / 60)
     seconds = seconds % 60
     minutes = minutes % 60
-    local uptime = string.format("%02d:%02d:%02d", hours, minutes, seconds)
+    return string.format("%02d:%02d:%02d", hours, minutes, seconds)
+end
 
+function device.get_status(phone_number)
     return {
         imei = mobile.imei(),
         iccid = mobile.iccid(),
-        phone_number = context.phone_number,
+        phone_number = phone_number,
         ip = socket.localIP(),
         signal_strength = mobile.rsrp(),
-        operator = operator,
-        uptime = uptime,
+        operator = operator_name(),
+        uptime = uptime_hms(),
         timestamp = os.time()
     }
 end
@@ -56,9 +53,6 @@ function device.recover_network()
     end)
 end
 
---- Gets the phone number from the SIM card or config.
--- @param config The application configuration table.
--- @return The phone number as a string.
 function device.get_phone_number(config)
     local number = mobile.number()
     if number and number ~= "" then
