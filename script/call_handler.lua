@@ -3,7 +3,7 @@ return {
         local queue, topics, phone_number = opts.queue, opts.topics, opts.phone_number
         local in_call, started_at = false, 0
 
-        local function handle_call_event(status)
+        sys.subscribe("CC_IND", function(status)
             if status == "INCOMINGCALL" then
                 if in_call then return end
                 in_call, started_at = true, os.time()
@@ -15,7 +15,10 @@ return {
                         timestamp = started_at
                     }
                 })
-            elseif status == "DISCONNECTED" and in_call then
+                return
+            end
+
+            if status == "DISCONNECTED" and in_call then
                 in_call = false
                 local duration = math.max(0, os.time() - started_at)
                 queue.add({
@@ -28,8 +31,6 @@ return {
                     }
                 })
             end
-        end
-
-        sys.subscribe("CC_IND", handle_call_event)
+        end)
     end
 }

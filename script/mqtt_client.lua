@@ -1,6 +1,7 @@
 local M = {}
 
 local connection = { mqttc = nil, topics = {}, connected = false }
+local confirm
 
 local function build_topics(imei)
     return {
@@ -22,10 +23,14 @@ local function on_event(_, event, data, payload)
         sys.publish("MQTT_DISCONNECTED")
     elseif event == "error" then
         log.error("mqtt", "error", data, payload)
+    elseif event == "sent" and confirm then
+        sys.publish("MQTT_CONFIRMED", data)
+        confirm(data)
     end
 end
 
-function M.init(mqtt_config, phone_number)
+function M.init(mqtt_config, phone_number, on_confirm)
+    confirm = on_confirm
     local imei = mobile.imei()
     connection.topics = build_topics(imei)
     connection.phone_number = phone_number
@@ -57,11 +62,9 @@ function M.publish(topic, payload, qos, retain)
         return false
     end
     local json_payload = json.encode(payload)
-    local msg_id = connection.mqttc:publish(topic, json_payload, qos or 1, retain and 1 or 0)
-    if not msg_id and (qos or 1) > 0 then
-        return false
-    end
-    return true
+    local qos_level = qos or 1
+    local retain_flag = retain and 1 or 0
+    return connection.mqttc:publish(topic, json_payload, qos_level, retain_flag)
 end
 
 function M.disconnect()

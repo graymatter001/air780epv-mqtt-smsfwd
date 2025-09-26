@@ -1,6 +1,6 @@
 --[[
 queue.lua keeps a minimal persistent FIFO using fskv for crash resilience.
-It exposes functional helpers rather than constructors.
+It remains simple: pop returns the head, remove deletes it once confirmed.
 --]]
 
 local M = {}
@@ -9,6 +9,19 @@ local messages = {}
 
 local function generate_id()
     return "msg-" .. os.time() .. "-" .. math.random(9999)
+end
+
+local function persist(id, payload)
+    local ok, encoded = pcall(json.encode, payload)
+    if not ok then
+        log.error("queue", "Encode failed", encoded)
+        return false
+    end
+    if not fskv.set(id, encoded) then
+        log.error("queue", "Persist failed", id)
+        return false
+    end
+    return true
 end
 
 local function load_persisted()
@@ -37,25 +50,15 @@ function M.init()
     load_persisted()
 end
 
-local function persist(id, payload)
-    local ok, encoded = pcall(json.encode, payload)
-    if not ok then
-        log.error("queue", "Encode failed", encoded)
-        return false
-    end
-    if not fskv.set(id, encoded) then
-        log.error("queue", "Persist failed", id)
-        return false
-    end
-    return true
-end
-
 function M.add(payload)
     local id = generate_id()
     payload.retry = payload.retry or 0
     if persist(id, payload) then
         table.insert(messages, { id = id, payload = payload, retry = payload.retry })
         log.info("queue", "Queued", id)
+        if type(sys) == "table" and sys.publish then
+            sys.publish("QUEUE_WAKE")
+        end
     end
 end
 

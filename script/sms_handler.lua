@@ -1,52 +1,42 @@
-local M = {}
+local function enqueue(queue, topic, payload)
+    queue.add({ topic = topic, payload = payload })
+end
 
-local function is_whitelisted(number, whitelist)
-    for _, entry in ipairs(whitelist or {}) do
-        if entry == number then return true end
+local function authorised(sender, whitelist)
+    for _, number in ipairs(whitelist or {}) do
+        if number == sender then return true end
     end
     return false
 end
 
-local function enqueue(queue, topics, payload)
-    queue.add({ topic = topics.sms_incoming, payload = payload })
-end
+return {
+    init = function(opts)
+        local queue, topics, phone_number = opts.queue, opts.topics, opts.phone_number
+        local whitelist = opts.whitelist
 
-local function enqueue_status(queue, topics, payload)
-    queue.add({ topic = topics.sms_status, payload = payload })
-end
+        sys.subscribe("SMS_INC", function(sender_number, sms_content)
+            log.info("sms", "incoming", sender_number)
 
-function M.init(opts)
-    local queue = opts.queue
-    local topics = opts.topics
-    local phone_number = opts.phone_number
-    local whitelist = opts.whitelist
-
-    local function handle_incoming_sms(sender_number, sms_content)
-        log.info("sms", "incoming", sender_number)
-
-        if is_whitelisted(sender_number, whitelist) then
-            local recipient, content = sms_content:match("^SMS,(%S+),(.+)$")
-            if recipient and content then
-                local success = sms.send(recipient, content)
-                enqueue_status(queue, topics, {
-                    sender = phone_number,
-                    recipient = recipient,
-                    status = success and "delivered" or "failed",
-                    timestamp = os.time()
-                })
-                return
+            if authorised(sender_number, whitelist) then
+                local recipient, content = sms_content:match("^SMS,(%S+),(.+)$")
+                if recipient and content then
+                    local success = sms.send(recipient, content)
+                    enqueue(queue, topics.sms_status, {
+                        sender = phone_number,
+                        recipient = recipient,
+                        status = success and "delivered" or "failed",
+                        timestamp = os.time()
+                    })
+                    return
+                end
             end
-        end
 
-        enqueue(queue, topics, {
-            sender = sender_number,
-            recipient = phone_number,
-            content = sms_content,
-            timestamp = os.time()
-        })
+            enqueue(queue, topics.sms_incoming, {
+                sender = sender_number,
+                recipient = phone_number,
+                content = sms_content,
+                timestamp = os.time()
+            })
+        end)
     end
-
-    sys.subscribe("SMS_INC", handle_incoming_sms)
-end
-
-return M
+}
