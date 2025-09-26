@@ -79,15 +79,6 @@ sys.subscribe("MQTT_CONNECTED", function()
     sys.publish("QUEUE_WAKE")
 end)
 
-local function publish_device_status(broadcast)
-    local status = device.get_status(phone_number)
-    if broadcast then status.broadcast = true end
-    queue.add({
-        topic = topics.device_status,
-        payload = status
-    })
-end
-
 local function reset_inflight()
     for msg_id in pairs(inflight) do
         inflight[msg_id] = nil
@@ -191,10 +182,6 @@ sys.taskInit(function()
 
     mqtt_client.connect()
     sys.waitUntil("MQTT_CONNECTED", 60000)
-
-    sys.timerLoopStart(function()
-        publish_device_status(false)
-    end, 60000)
 
     sys.timerLoopStart(process_queue, 1000)
 end)
