@@ -54,9 +54,9 @@ function mqtt_client.new()
             imei = client.imei,
             boot_time = os.time()
         })
-        client.mqttc:will(client.topics.device_status, lwt_payload, 1, 0)
+        client.mqttc:will(client.topics.device_status, lwt_payload, 1, 1)
 
-        client.mqttc:auth(client.imei, client.config.user, client.config.pass)
+        client.mqttc:auth(client.imei, client.config.user, client.config.pass, false)
         client.mqttc:keepalive(client.config.keepalive)
         client.mqttc:autoreconn(true, 5000) -- Auto reconnect with 5s delay
         client.mqttc:on(on_event)
@@ -68,7 +68,7 @@ function mqtt_client.new()
     -- @param payload The message payload (a Lua table).
     -- @param qos The Quality of Service level (0, 1, or 2).
     -- @return true if publishing was successful, false otherwise.
-    function client.publish(topic, payload, qos)
+    function client.publish(topic, payload, qos, retain)
         if not client.connected or not client.mqttc then
             log.warn("mqtt.publish", "Not connected, cannot publish to", topic)
             return false
@@ -77,7 +77,7 @@ function mqtt_client.new()
         local json_payload = json.encode(payload)
 
         log.info("mqtt.publish", "Publishing to", topic)
-        local msg_id = client.mqttc:publish(topic, json_payload, qos or 1)
+        local msg_id = client.mqttc:publish(topic, json_payload, qos or 1, retain and 1 or 0)
 
         if not msg_id and (qos or 1) > 0 then
             log.warn("mqtt.publish", "Failed to publish message to", topic)

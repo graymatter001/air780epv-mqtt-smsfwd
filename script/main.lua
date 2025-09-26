@@ -46,6 +46,18 @@ local mq_client = mqtt_client.new()
 sms_handler.new(msg_queue, mq_client)
 call_handler.new(msg_queue, mq_client)
 
+-- Publish retained 'online' status on each MQTT connect (queued for reliability)
+sys.subscribe("MQTT_CONNECTED", function()
+    local status_payload = device.get_status()
+    status_payload.status = "online"
+    status_payload.broadcast = true
+    msg_queue.add({
+        topic = mq_client.topics.device_status,
+        payload = status_payload,
+        qos = 1,
+        retain = true
+    })
+end)
 -- Main application task
 
 --- Publishes the device status to the MQTT broker.
@@ -63,12 +75,18 @@ end
 
 --- Processes all messages in the queue until it is empty.
 local is_processing_queue = false
+local error_count = 0
 local function process_queue()
     -- This flag prevents re-entry if the function is called again while it's already running
     if is_processing_queue then return end
     is_processing_queue = true
 
-    local error_count = 0
+    -- Only process when MQTT is connected to avoid inflating retries while offline
+    if not mq_client.connected then
+        is_processing_queue = false
+        return
+    end
+
     local msg = msg_queue.pop()
 
     if msg then
@@ -78,7 +96,7 @@ local function process_queue()
             log.warn("main", "Message exceeded max retries, discarding:", msg.id)
             msg_queue.remove(msg.id)
         else
-            local success = mq_client.publish(msg.payload.topic, msg.payload.payload, 1)
+            local success = mq_client.publish(msg.payload.topic, msg.payload.payload, msg.payload.qos or 1, msg.payload.retain or false)
             if success then
                 log.info("main", "Message published successfully:", msg.id)
                 msg_queue.remove(msg.id)
@@ -116,8 +134,7 @@ sys.taskInit(function()
     -- Wait for MQTT connection before starting queue processing
     sys.waitUntil("MQTT_CONNECTED", 60000)
 
-    -- Send initial online message
-    publish_device_status(true)
+    -- Initial online message is queued on MQTT_CONNECTED event; no direct send here
 
     -- Periodically publish device status (heartbeat)
     sys.timerLoopStart(function()
