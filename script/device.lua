@@ -12,6 +12,8 @@ local oper_data = {
     ["46015"] = "CBN"
 }
 
+local recovering = false
+
 local function operator_name()
     local imsi = mobile.imsi(mobile.simid()) or ""
     local mcc_mnc = string.sub(imsi, 1, 5)
@@ -41,16 +43,25 @@ function device.get_status(phone_number)
 end
 
 --- Attempts to recover the network connection by toggling flight mode.
-function device.recover_network()
-    log.warn("device.recover_network", "Attempting to recover network connection...")
+function device.recover_network(reason)
+    if recovering then
+        log.info("device.recover_network", "Recovery already in progress", reason or "")
+        return false
+    end
+
+    recovering = true
     sys.taskInit(function()
+        log.warn("device.recover_network", "Attempting to recover network connection...", reason or "")
         mobile.reset()
         sys.wait(1000)
         mobile.flymode(0, true)
         sys.wait(1000)
         mobile.flymode(0, false)
         log.info("device.recover_network", "Network recovery sequence complete.")
+        recovering = false
     end)
+
+    return true
 end
 
 function device.get_phone_number(config)

@@ -20,6 +20,12 @@ local mqtt_client = require("mqtt_client")
 local sms_handler = require("sms_handler")
 local call_handler = require("call_handler")
 
+local ip_ready_timeout = 120000
+local max_ip_attempts = 3
+local post_recover_delay = 10000
+local mqtt_disconnect_threshold = 3
+local mqtt_recovery_backoff = 60000
+
 if wdt then
     wdt.init(9000)
     sys.timerLoopStart(wdt.feed, 3000)
@@ -60,6 +66,7 @@ call_handler.init({
 })
 
 sys.subscribe("MQTT_CONNECTED", function()
+    mqtt_disconnects = 0
     local status = device.get_status(phone_number)
     status.status = "online"
     status.broadcast = true
@@ -88,6 +95,9 @@ local function reset_inflight()
 end
 
 local processing = false
+local ip_attempts = 0
+local mqtt_disconnects = 0
+local last_mqtt_recover = 0
 local function process_queue()
     if processing then return end
     if not mqtt_client.is_connected() then return end
@@ -132,13 +142,46 @@ end)
 
 sys.subscribe("MQTT_DISCONNECTED", function()
     reset_inflight()
+    mqtt_disconnects = mqtt_disconnects + 1
+    local now = mcu.ticks()
+    if mqtt_disconnects >= mqtt_disconnect_threshold then
+        if now - last_mqtt_recover >= mqtt_recovery_backoff then
+            if device.recover_network("mqtt disconnect") then
+                last_mqtt_recover = now
+            end
+        else
+            log.info("main", "Recovery backoff active, skipping")
+        end
+        mqtt_disconnects = 0
+    end
     sys.publish("QUEUE_WAKE")
 end)
 
 sys.taskInit(function()
     log.info("main", "Waiting for network connection...")
-    sys.waitUntil("IP_READY", 120000)
-    log.info("main", "Network is ready.")
+    while ip_attempts < max_ip_attempts do
+        local ready = sys.waitUntil("IP_READY", ip_ready_timeout)
+        if ready then
+            log.info("main", "Network is ready.")
+            ip_attempts = 0
+            break
+        end
+
+        ip_attempts = ip_attempts + 1
+        log.warn("main", "IP_READY timed out", ip_attempts, "of", max_ip_attempts)
+        if device.recover_network("ip timeout") then
+            sys.wait(post_recover_delay)
+        end
+    end
+
+    if ip_attempts >= max_ip_attempts then
+        log.error("main", "Unable to obtain IP address after attempts", max_ip_attempts)
+        if rtos and rtos.reboot then
+            log.error("main", "Rebooting due to network recovery exhaustion")
+            rtos.reboot()
+        end
+        return
+    end
 
     if not sntp_started and config.sntp_interval and config.sntp_interval > 0 then
         if os.time() < 1714500000 then socket.sntp() end
