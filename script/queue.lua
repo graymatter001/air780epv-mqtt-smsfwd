@@ -36,7 +36,8 @@ local function load_persisted()
             if chunk then
                 local ok, payload = pcall(json.decode, chunk)
                 if ok and payload then
-                    table.insert(messages, { id = key, payload = payload, retry = payload.retry or 0 })
+                    payload.retry = nil
+                    table.insert(messages, { id = key, payload = payload })
                 else
                     log.warn("queue", "Bad payload for", key)
                 end
@@ -52,22 +53,15 @@ end
 
 function M.add(payload)
     local id = generate_id()
-    payload.retry = payload.retry or 0
     if persist(id, payload) then
-        table.insert(messages, { id = id, payload = payload, retry = payload.retry })
+        table.insert(messages, { id = id, payload = payload })
         log.info("queue", "Queued", id)
-        if type(sys) == "table" and sys.publish then
-            sys.publish("QUEUE_WAKE")
-        end
     end
 end
 
 function M.pop()
     local message = messages[1]
     if not message then return nil end
-    message.retry = message.retry + 1
-    message.payload.retry = message.retry
-    persist(message.id, message.payload)
     return message
 end
 

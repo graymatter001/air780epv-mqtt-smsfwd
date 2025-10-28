@@ -14,11 +14,6 @@ local config = {
         keepalive = 120
     },
 
-    -- Queue Settings
-    queue = {
-        max_retries = 20
-    },
-
     -- SMS Control Settings
     sms_control = {
         -- A list of phone numbers authorized to send commands

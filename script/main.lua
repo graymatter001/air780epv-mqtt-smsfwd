@@ -1,8 +1,3 @@
---[[
-main.lua wires together the bare minimum needed to push events to MQTT.
-Heavy abstractions just added clutter, so the orchestration now lives here.
---]]
-
 PROJECT = "mqtt_sms_forwarder"
 VERSION = "1.0.0"
 
@@ -21,10 +16,6 @@ local sms_handler = require("sms_handler")
 local call_handler = require("call_handler")
 
 local ip_ready_timeout = 120000
-local max_ip_attempts = 3
-local post_recover_delay = 10000
-local mqtt_disconnect_threshold = 3
-local mqtt_recovery_backoff = 60000
 
 if wdt then
     wdt.init(9000)
@@ -36,21 +27,73 @@ mobile.setAuto(10000, 30000, 8, true, 60000)
 fskv.init()
 
 local phone_number = device.get_phone_number(config)
-queue.init()
 
-local inflight = {}
+local current_message = nil
 local sntp_started = false
 
+local process_queue
+
 local function on_publish_confirm(msg_id)
-    local message = inflight[msg_id]
-    if not message then return end
+    if not current_message then return end
+    local expected = current_message.msg_id
+    if expected and msg_id and tostring(msg_id) ~= tostring(expected) then
+        log.warn("main", "Ack id mismatch", msg_id, "expected", expected)
+    end
     log.info("main", "Publish confirmed", msg_id)
-    queue.remove(message.id)
-    inflight[msg_id] = nil
-    sys.publish("QUEUE_WAKE")
+    queue.remove(current_message.id)
+    current_message = nil
 end
 
 local topics = mqtt_client.init(config.mqtt, phone_number, on_publish_confirm)
+
+sys.subscribe("MQTT_CONNECTED", function()
+    local status = device.get_status(phone_number)
+    status.status = "online"
+    status.broadcast = true
+    queue.add({
+        topic = topics.device_status,
+        payload = status,
+        qos = 1,
+        retain = true
+    })
+end)
+
+process_queue = function()
+    if not mqtt_client.is_connected() then return end
+    if current_message then return end
+
+    local msg = queue.pop()
+    if not msg then
+        return
+    end
+
+    local payload = msg.payload
+    local qos = payload.qos or 1
+    local retain = payload.retain or false
+    current_message = { id = msg.id }
+
+    local result = mqtt_client.publish(payload.topic, payload.payload, qos, retain)
+
+    if type(result) == "number" then
+        current_message.msg_id = result
+        return
+    end
+
+    if result == true or qos == 0 then
+        queue.remove(current_message.id)
+        current_message = nil
+        return
+    end
+
+    log.warn("main", "Publish rejected, will retry", msg.id)
+    current_message = nil
+end
+
+sys.subscribe("MQTT_DISCONNECTED", function()
+    current_message = nil
+end)
+
+queue.init()
 
 sms_handler.init({
     queue = queue,
@@ -65,113 +108,13 @@ call_handler.init({
     phone_number = phone_number
 })
 
-sys.subscribe("MQTT_CONNECTED", function()
-    mqtt_disconnects = 0
-    local status = device.get_status(phone_number)
-    status.status = "online"
-    status.broadcast = true
-    queue.add({
-        topic = topics.device_status,
-        payload = status,
-        qos = 1,
-        retain = true
-    })
-    sys.publish("QUEUE_WAKE")
-end)
-
-local function reset_inflight()
-    for msg_id in pairs(inflight) do
-        inflight[msg_id] = nil
-    end
-end
-
-local processing = false
-local ip_attempts = 0
-local mqtt_disconnects = 0
-local last_mqtt_recover = 0
-local function process_queue()
-    if processing then return end
-    if not mqtt_client.is_connected() then return end
-    if next(inflight) then return end
-
-    processing = true
-
-    local msg = queue.pop()
-    if not msg then
-        processing = false
-        return
-    end
-
-    if msg.retry > config.queue.max_retries then
-        log.warn("main", "Max retries reached, dropping", msg.id)
-        queue.remove(msg.id)
-        processing = false
-        sys.publish("QUEUE_WAKE")
-        return
-    end
-
-    local payload = msg.payload
-    local qos = payload.qos or 1
-    local result = mqtt_client.publish(payload.topic, payload.payload, qos, payload.retain or false)
-
-    if type(result) == "number" then
-        inflight[result] = msg
-    elseif result == true or qos == 0 then
-        queue.remove(msg.id)
-        sys.publish("QUEUE_WAKE")
-    else
-        log.warn("main", "Publish rejected, will retry", msg.id)
-        sys.timerStart(process_queue, 2000)
-    end
-
-    processing = false
-end
-
-sys.subscribe("QUEUE_WAKE", function()
-    process_queue()
-end)
-
-sys.subscribe("MQTT_DISCONNECTED", function()
-    reset_inflight()
-    mqtt_disconnects = mqtt_disconnects + 1
-    local now = mcu.ticks()
-    if mqtt_disconnects >= mqtt_disconnect_threshold then
-        if now - last_mqtt_recover >= mqtt_recovery_backoff then
-            if device.recover_network("mqtt disconnect") then
-                last_mqtt_recover = now
-            end
-        else
-            log.info("main", "Recovery backoff active, skipping")
-        end
-        mqtt_disconnects = 0
-    end
-    sys.publish("QUEUE_WAKE")
-end)
-
 sys.taskInit(function()
     log.info("main", "Waiting for network connection...")
-    while ip_attempts < max_ip_attempts do
-        local ready = sys.waitUntil("IP_READY", ip_ready_timeout)
-        if ready then
-            log.info("main", "Network is ready.")
-            ip_attempts = 0
-            break
-        end
-
-        ip_attempts = ip_attempts + 1
-        log.warn("main", "IP_READY timed out", ip_attempts, "of", max_ip_attempts)
-        if device.recover_network("ip timeout") then
-            sys.wait(post_recover_delay)
-        end
-    end
-
-    if ip_attempts >= max_ip_attempts then
-        log.error("main", "Unable to obtain IP address after attempts", max_ip_attempts)
-        if rtos and rtos.reboot then
-            log.error("main", "Rebooting due to network recovery exhaustion")
-            rtos.reboot()
-        end
-        return
+    local ready = sys.waitUntil("IP_READY", ip_ready_timeout)
+    if ready then
+        log.info("main", "Network is ready.")
+    else
+        log.warn("main", "IP_READY timeout, continuing")
     end
 
     if not sntp_started and config.sntp_interval and config.sntp_interval > 0 then
