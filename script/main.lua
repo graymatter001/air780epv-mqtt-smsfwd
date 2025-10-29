@@ -28,20 +28,17 @@ fskv.init()
 
 local phone_number = device.get_phone_number(config)
 
-local current_message = nil
-local sntp_started = false
-
-local process_queue
+local inflight_message = nil
 
 local function on_publish_confirm(msg_id)
-    if not current_message then return end
-    local expected = current_message.msg_id
-    if expected and msg_id and tostring(msg_id) ~= tostring(expected) then
+    if not inflight_message then return end
+    local expected = inflight_message.msg_id
+    if expected and msg_id and msg_id ~= expected then
         log.warn("main", "Ack id mismatch", msg_id, "expected", expected)
     end
     log.info("main", "Publish confirmed", msg_id)
-    queue.remove(current_message.id)
-    current_message = nil
+    queue.remove(inflight_message.queue_id)
+    inflight_message = nil
 end
 
 local topics = mqtt_client.init(config.mqtt, phone_number, on_publish_confirm)
@@ -58,9 +55,9 @@ sys.subscribe("MQTT_CONNECTED", function()
     })
 end)
 
-process_queue = function()
+local function process_queue()
     if not mqtt_client.is_connected() then return end
-    if current_message then return end
+    if inflight_message then return end
 
     local msg = queue.pop()
     if not msg then
@@ -70,27 +67,27 @@ process_queue = function()
     local payload = msg.payload
     local qos = payload.qos or 1
     local retain = payload.retain or false
-    current_message = { id = msg.id }
+    inflight_message = { queue_id = msg.id }
 
     local result = mqtt_client.publish(payload.topic, payload.payload, qos, retain)
 
     if type(result) == "number" then
-        current_message.msg_id = result
+        inflight_message.msg_id = result
         return
     end
 
     if result == true or qos == 0 then
-        queue.remove(current_message.id)
-        current_message = nil
+        queue.remove(inflight_message.queue_id)
+        inflight_message = nil
         return
     end
 
     log.warn("main", "Publish rejected, will retry", msg.id)
-    current_message = nil
+    inflight_message = nil
 end
 
 sys.subscribe("MQTT_DISCONNECTED", function()
-    current_message = nil
+    inflight_message = nil
 end)
 
 queue.init()
@@ -117,10 +114,9 @@ sys.taskInit(function()
         log.warn("main", "IP_READY timeout, continuing")
     end
 
-    if not sntp_started and config.sntp_interval and config.sntp_interval > 0 then
+    if config.sntp_interval and config.sntp_interval > 0 then
         if os.time() < 1714500000 then socket.sntp() end
         sys.timerLoopStart(socket.sntp, config.sntp_interval)
-        sntp_started = true
     end
 
     mqtt_client.connect()

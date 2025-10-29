@@ -5,10 +5,10 @@ It remains simple: pop returns the head, remove deletes it once confirmed.
 
 local M = {}
 
-local messages = {}
+local items = {}
 
 local function generate_id()
-    return "msg-" .. os.time() .. "-" .. math.random(9999)
+    return "item-" .. os.time() .. "-" .. math.random(9999)
 end
 
 local function persist(id, payload)
@@ -26,25 +26,25 @@ end
 
 local function load_persisted()
     log.info("queue", "Loading messages from fskv")
-    messages = {}
+    items = {}
     local iter = fskv.iter()
     while iter do
         local key = fskv.next(iter)
         if not key then break end
-        if key:find("msg-") then
+        if key:find("item-") then
             local chunk = fskv.get(key)
             if chunk then
                 local ok, payload = pcall(json.decode, chunk)
                 if ok and payload then
                     payload.retry = nil
-                    table.insert(messages, { id = key, payload = payload })
+                    table.insert(items, { id = key, payload = payload })
                 else
                     log.warn("queue", "Bad payload for", key)
                 end
             end
         end
     end
-    log.info("queue", "Loaded", #messages, "messages")
+    log.info("queue", "Loaded", #items, "items")
 end
 
 function M.init()
@@ -54,21 +54,21 @@ end
 function M.add(payload)
     local id = generate_id()
     if persist(id, payload) then
-        table.insert(messages, { id = id, payload = payload })
+        table.insert(items, { id = id, payload = payload })
         log.info("queue", "Queued", id)
     end
 end
 
 function M.pop()
-    local message = messages[1]
-    if not message then return nil end
-    return message
+    local item = items[1]
+    if not item then return nil end
+    return item
 end
 
 function M.remove(id)
-    for idx, message in ipairs(messages) do
-        if message.id == id then
-            table.remove(messages, idx)
+    for idx, item in ipairs(items) do
+        if item.id == id then
+            table.remove(items, idx)
             fskv.del(id)
             log.info("queue", "Removed", id)
             return
