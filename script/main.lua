@@ -16,6 +16,8 @@ local sms_handler = require("sms_handler")
 local call_handler = require("call_handler")
 
 local ip_ready_timeout = 120000
+local flymode_recovery_delay = 2000
+local recovery_in_progress = false
 
 if wdt then
     wdt.init(9000)
@@ -43,26 +45,27 @@ end
 
 local topics = mqtt_client.init(config.mqtt, phone_number, on_publish_confirm)
 
-sys.subscribe("MQTT_CONNECTED", function()
-    local status = device.get_status(phone_number)
-    status.status = "online"
-    status.broadcast = true
-    queue.add({
-        topic = topics.device_status,
-        payload = status,
-        qos = 1,
-        retain = true
-    })
-end)
+queue.init()
+
+sms_handler.init({
+    queue = queue,
+    topics = topics,
+    phone_number = phone_number,
+    whitelist = config.sms_control.whitelist_numbers
+})
+
+call_handler.init({
+    queue = queue,
+    topics = topics,
+    phone_number = phone_number
+})
 
 local function process_queue()
     if not mqtt_client.is_connected() then return end
     if inflight_message then return end
 
     local msg = queue.pop()
-    if not msg then
-        return
-    end
+    if not msg then return end
 
     local payload = msg.payload
     local qos = payload.qos or 1
@@ -86,24 +89,41 @@ local function process_queue()
     inflight_message = nil
 end
 
+local function recover_data_session(reason)
+    if recovery_in_progress then return end
+    recovery_in_progress = true
+    sys.taskInit(function()
+        log.warn("main", "IP lost, forcing data restart", reason or "")
+        mobile.flymode(0, true)
+        sys.wait(flymode_recovery_delay)
+        mobile.flymode(0, false)
+        local ready = sys.waitUntil("IP_READY", ip_ready_timeout)
+        if not ready then
+            log.error("main", "IP recovery timed out")
+        end
+        recovery_in_progress = false
+    end)
+end
+
+sys.subscribe("MQTT_CONNECTED", function()
+    local status = device.get_status(phone_number)
+    status.status = "online"
+    status.broadcast = true
+    queue.add({
+        topic = topics.device_status,
+        payload = status,
+        qos = 1,
+        retain = true
+    })
+end)
+
 sys.subscribe("MQTT_DISCONNECTED", function()
     inflight_message = nil
 end)
 
-queue.init()
-
-sms_handler.init({
-    queue = queue,
-    topics = topics,
-    phone_number = phone_number,
-    whitelist = config.sms_control.whitelist_numbers
-})
-
-call_handler.init({
-    queue = queue,
-    topics = topics,
-    phone_number = phone_number
-})
+sys.subscribe("IP_LOSE", function()
+    recover_data_session("IP_LOSE")
+end)
 
 sys.taskInit(function()
     log.info("main", "Waiting for network connection...")
